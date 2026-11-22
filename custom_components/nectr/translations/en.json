@@ -1,0 +1,75 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sign in to Nectr",
+        "description": "Use the email and password you use for Nectr My Account. Nectr will email you a 6-digit code to finish signing in. Your password is not stored.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "otp": {
+        "title": "Enter your Nectr code",
+        "description": "Nectr has emailed a 6-digit code to {email}. Codes can take a while to arrive. {status}",
+        "data": {
+          "otp": "Code",
+          "resend": "Send me a new code instead"
+        },
+        "data_description": {
+          "resend": "Tick this and submit to have Nectr email a new code."
+        }
+      },
+      "account": {
+        "title": "Choose a Nectr account",
+        "data": {
+          "account_number": "Account"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to Nectr again",
+        "description": "Home Assistant is no longer signed in to Nectr as {email}. Enter your password and Nectr will email you a new code.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error",
+      "too_many_attempts": "Too many sign-in attempts. Wait a while and try again.",
+      "invalid_otp": "That code is not right. Check it and try again.",
+      "otp_expired": "That code has expired. Tick \"Send me a new code\" to get another.",
+      "too_many_otp_attempts": "Too many incorrect codes. Tick \"Send me a new code\" to get another.",
+      "login_expired": "This sign-in has expired. Close this dialog and start again."
+    },
+    "abort": {
+      "already_configured": "Account is already configured",
+      "reauth_successful": "Re-authentication was successful",
+      "no_accounts": "No active Nectr accounts were found for this login.",
+      "wrong_account": "This login does not have access to the Nectr account this entry was set up with."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "latest_data": {
+        "name": "Latest data"
+      },
+      "billing_period_start": {
+        "name": "Billing period start"
+      },
+      "billing_period_end": {
+        "name": "Billing period end"
+      }
+    }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "Nectr rejected the saved sign-in. Sign in again to continue."
+    },
+    "update_failed": {
+      "message": "Could not get data from Nectr: {error}"
+    }
+  }
+}

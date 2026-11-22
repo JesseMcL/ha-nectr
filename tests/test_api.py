@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+import itertools
 from zoneinfo import ZoneInfo
 
 from homeassistant.core import HomeAssistant
@@ -12,7 +13,7 @@ import pytest
 from custom_components.nectr.api import (
     NectrAuthError,
     NectrClient,
-    NectrConnectionError,
+    NectrDataError,
     NectrInvalidCredentialsError,
     NectrInvalidOtpError,
     NectrLoginSessionExpiredError,
@@ -21,7 +22,16 @@ from custom_components.nectr.api import (
     hour_starts_for_labels,
 )
 
-from .conftest import ACCOUNT, DEVICE_ID, EMAIL, OTP, PASSWORD, FakeNectr, full_day, hour_row
+from .conftest import (
+    ACCOUNT,
+    DEVICE_ID,
+    EMAIL,
+    OTP,
+    PASSWORD,
+    FakeNectr,
+    full_day,
+    hour_row,
+)
 
 SYD = ZoneInfo("Australia/Sydney")
 BNE = ZoneInfo("Australia/Brisbane")
@@ -46,7 +56,7 @@ def test_hour_starts_dst_start() -> None:
     hours = [h for h in range(24) if h != 2]
     starts = hour_starts_for_labels(date(2026, 10, 4), _labels(hours), SYD)
     assert len(starts) == 23
-    assert all((b - a).total_seconds() == 3600 for a, b in zip(starts, starts[1:]))
+    assert all((b - a).total_seconds() == 3600 for a, b in itertools.pairwise(starts))
 
 
 def test_hour_starts_dst_end_repeated_hour() -> None:
@@ -55,7 +65,9 @@ def test_hour_starts_dst_end_repeated_hour() -> None:
     starts = hour_starts_for_labels(date(2026, 4, 5), _labels(hours), SYD)
     assert len(starts) == 25
     assert starts[3] - starts[2] == starts[1] - starts[0]
-    assert starts[2].astimezone(SYD).utcoffset() != starts[3].astimezone(SYD).utcoffset()
+    assert (
+        starts[2].astimezone(SYD).utcoffset() != starts[3].astimezone(SYD).utcoffset()
+    )
 
 
 def test_hour_starts_partial_and_other_zones() -> None:
@@ -70,9 +82,9 @@ def test_hour_starts_partial_and_other_zones() -> None:
 
 def test_hour_starts_rejects_impossible_labels() -> None:
     """Labels that don't fit the day raise."""
-    with pytest.raises(NectrConnectionError):
+    with pytest.raises(NectrDataError):
         hour_starts_for_labels(date(2026, 11, 15), _labels([5, 4]), SYD)
-    with pytest.raises(NectrConnectionError):
+    with pytest.raises(NectrDataError):
         hour_starts_for_labels(date(2026, 11, 15), ["late"], SYD)
 
 
@@ -107,10 +119,16 @@ async def test_login_and_fetch(hass: HomeAssistant, fake_nectr: FakeNectr) -> No
     assert await client.async_get_hourly_usage(ACCOUNT, date(2026, 11, 16), SYD) == []
 
 
-async def test_bill_periods_paginate(hass: HomeAssistant, fake_nectr: FakeNectr) -> None:
+async def test_bill_periods_paginate(
+    hass: HomeAssistant, fake_nectr: FakeNectr
+) -> None:
     """Bill periods are collected across pages."""
-    fake_nectr.bill_periods = [(f"19/{m:02d}/2026", f"18/{m + 1:02d}/2026") for m in range(10, 0, -1)]
-    client = NectrClient(async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="rt-initial")
+    fake_nectr.bill_periods = [
+        (f"19/{m:02d}/2026", f"18/{m + 1:02d}/2026") for m in range(10, 0, -1)
+    ]
+    client = NectrClient(
+        async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="rt-initial"
+    )
     periods = await client.async_get_bill_periods(ACCOUNT)
     assert len(periods) == 10
     assert periods[-1].start == date(2026, 1, 19)
@@ -174,7 +192,9 @@ async def test_refresh_rotates_and_retries_on_401(hass, fake_nectr: FakeNectr) -
 async def test_refresh_soon_expiring_token(hass, fake_nectr: FakeNectr) -> None:
     """A token close to expiry is refreshed before use."""
     fake_nectr.access_lifetime = 30
-    client = NectrClient(async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="rt-initial")
+    client = NectrClient(
+        async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="rt-initial"
+    )
     await client.async_get_accounts()
     await client.async_get_accounts()
     assert fake_nectr.calls.count("refreshToken") == 2
@@ -182,7 +202,9 @@ async def test_refresh_soon_expiring_token(hass, fake_nectr: FakeNectr) -> None:
 
 async def test_refresh_failure_is_auth_error(hass, fake_nectr: FakeNectr) -> None:
     """A rejected refresh token means the user must log in again."""
-    client = NectrClient(async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="stale")
+    client = NectrClient(
+        async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="stale"
+    )
     with pytest.raises(NectrAuthError):
         await client.async_get_accounts()
     client = NectrClient(async_get_clientsession(hass), device_id=DEVICE_ID)
@@ -194,6 +216,8 @@ async def test_dst_end_day_usage(hass, fake_nectr: FakeNectr) -> None:
     """A 25-hour day comes back with 25 distinct hour starts."""
     rows = [hour_row(h) for h in (0, 1, 2, 2, *range(3, 24))]
     fake_nectr.hourly[date(2026, 4, 5)] = rows
-    client = NectrClient(async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="rt-initial")
+    client = NectrClient(
+        async_get_clientsession(hass), device_id=DEVICE_ID, refresh_token="rt-initial"
+    )
     usage = await client.async_get_hourly_usage(ACCOUNT, date(2026, 4, 5), SYD)
     assert len({u.start for u in usage}) == 25

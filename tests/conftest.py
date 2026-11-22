@@ -34,8 +34,8 @@ DEVICE_ID = "11111111-2222-3333-4444-555555555555"
 
 
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations):
-    """Enable loading custom integrations in all tests."""
+def auto_enable_custom_integrations(recorder_mock, enable_custom_integrations):
+    """Enable custom integrations and the recorder (a dependency) in all tests."""
     return
 
 
@@ -64,9 +64,12 @@ def hour_row(hour: int, grid: float = 1.0, export: float = 0.0, cl: float = 0.0)
     }
 
 
-def full_day(grid: float = 1.0, export: float = 0.0, cl: float = 0.0):
-    """Build 24 chronological hourly rows."""
-    return [hour_row(h, grid, export, cl) for h in range(24)]
+def full_day(
+    grid: float = 1.0, export: float = 0.0, cl: float = 0.0, *, day: date | None = None
+):
+    """Build a day's chronological hourly rows (23 on Sydney's DST-start day)."""
+    hours = [h for h in range(24) if not (day == date(2026, 10, 4) and h == 2)]
+    return [hour_row(h, grid, export, cl) for h in hours]
 
 
 class FakeNectr:
@@ -75,7 +78,9 @@ class FakeNectr:
     def __init__(self, mocker: AiohttpClientMocker) -> None:
         """Register with the aiohttp mocker."""
         self._mocker = mocker
-        self.accounts = [{"number": ACCOUNT, "status": "ACTIVE", "address": "1 Test St"}]
+        self.accounts = [
+            {"number": ACCOUNT, "status": "ACTIVE", "address": "1 Test St"}
+        ]
         self.account_info = {
             "isSmartMeterUser": True,
             "isExportRegister": True,
@@ -95,6 +100,7 @@ class FakeNectr:
         self.calls: list[str] = []
         self.hourly_requests: list[str] = []
         self.otp_session = "sess-1"
+        self.usage_http_error = False
         mocker.post(API_URL, side_effect=self._handle)
 
     def _issue(self) -> tuple[str, str]:
@@ -128,10 +134,14 @@ class FakeNectr:
                 return self._resp(self._error("Too many login attempts"))
             if variables["password"] != PASSWORD:
                 return self._resp(self._error("Invalid email or password"))
-            return self._resp({"data": {"requestLoginOtp": {"loginSessionId": self.otp_session}}})
+            return self._resp(
+                {"data": {"requestLoginOtp": {"loginSessionId": self.otp_session}}}
+            )
         if op == "resendLoginOtp":
             self.otp_session = "sess-2"
-            return self._resp({"data": {"resendLoginOtp": {"loginSessionId": "sess-2"}}})
+            return self._resp(
+                {"data": {"resendLoginOtp": {"loginSessionId": "sess-2"}}}
+            )
         if op == "verifyLoginOtp":
             if variables["loginSessionId"] == "dead":
                 return self._resp(self._error("Session expired", code="OTP_EXPIRED"))
@@ -142,14 +152,25 @@ class FakeNectr:
             if variables["otp"] != OTP:
                 return self._resp(self._error("Invalid OTP"))
             access, refresh = self._issue()
-            return self._resp({"data": {"verifyLoginOtp": {"token": access, "refreshToken": refresh}}})
+            return self._resp(
+                {"data": {"verifyLoginOtp": {"token": access, "refreshToken": refresh}}}
+            )
         if op == "refreshToken":
             match = re.search(r'refreshToken: "([^"]+)"', data["query"])
             token = match.group(1) if match else None
             if self.refresh_fails or token not in self.valid_refresh_tokens:
                 return self._resp(self._error("Invalid refresh token"))
             access, refresh = self._issue()
-            return self._resp({"data": {"refreshTokens": {"accessToken": access, "refreshToken": refresh}}})
+            return self._resp(
+                {
+                    "data": {
+                        "refreshTokens": {
+                            "accessToken": access,
+                            "refreshToken": refresh,
+                        }
+                    }
+                }
+            )
 
         auth = headers.get("Authorization", "")
         if auth.removeprefix("bearer ") not in self.access_tokens:
@@ -160,6 +181,8 @@ class FakeNectr:
         if op == "getAccountInfo":
             return self._resp({"data": {"accountInfo": self.account_info}})
         if op == "getUsageInfo":
+            if self.usage_http_error:
+                return self._resp({}, status=500)
             return self._resp({"data": {"getUsageInfo": self._usage(variables)}})
         raise AssertionError(f"Unexpected operation {op}")
 
@@ -170,7 +193,9 @@ class FakeNectr:
             return {
                 "message": "",
                 "hasNextPage": len(self.bill_periods) > page * 7,
-                "allUsage": [{"fromDate": f, "toDate": t, "period": ""} for f, t in rows],
+                "allUsage": [
+                    {"fromDate": f, "toDate": t, "period": ""} for f, t in rows
+                ],
             }
         assert v["granularity"] == "HOURLY"
         self.hourly_requests.append(v["fromDate"])
@@ -178,7 +203,11 @@ class FakeNectr:
         d = date(int(v["fromDate"][6:]), int(v["fromDate"][3:5]), int(day))
         rows = self.hourly.get(d, [])
         if not rows:
-            return {"message": "Oops! No Data Found.", "hasNextPage": False, "allUsage": []}
+            return {
+                "message": "Oops! No Data Found.",
+                "hasNextPage": False,
+                "allUsage": [],
+            }
         return {"message": "", "hasNextPage": False, "allUsage": list(reversed(rows))}
 
 

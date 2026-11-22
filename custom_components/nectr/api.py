@@ -38,6 +38,10 @@ class NectrConnectionError(NectrError):
     """The API could not be reached or returned an unexpected response."""
 
 
+class NectrDataError(NectrError):
+    """The API returned data that could not be interpreted."""
+
+
 class NectrAuthError(NectrError):
     """The session is no longer valid and the user must log in again."""
 
@@ -213,7 +217,7 @@ def _jwt_expiry(token: str) -> float | None:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
         return float(json.loads(base64.urlsafe_b64decode(payload))["exp"])
-    except (IndexError, KeyError, TypeError, ValueError):
+    except IndexError, KeyError, TypeError, ValueError:
         return None
 
 
@@ -254,11 +258,11 @@ def hour_starts_for_labels(day: date, labels: list[str], tz: tzinfo) -> list[dat
         try:
             hour = int(label.split(":", 1)[0])
         except ValueError as err:
-            raise NectrConnectionError(f"Unexpected hour label {label!r}") from err
+            raise NectrDataError(f"Unexpected hour label {label!r}") from err
         while idx < len(instants) and local_hours[idx] != hour:
             idx += 1
         if idx >= len(instants):
-            raise NectrConnectionError(
+            raise NectrDataError(
                 f"Hour labels for {day} do not fit the local day: {labels}"
             )
         result.append(instants[idx])
@@ -330,7 +334,12 @@ class NectrClient:
             ) as resp:
                 if resp.status == 401:
                     raise NectrGraphQLError(
-                        [{"message": "Unauthorized", "extensions": {"response": {"statusCode": 401}}}]
+                        [
+                            {
+                                "message": "Unauthorized",
+                                "extensions": {"response": {"statusCode": 401}},
+                            }
+                        ]
                     )
                 if resp.status >= 400:
                     raise NectrConnectionError(f"{operation}: HTTP {resp.status}")
