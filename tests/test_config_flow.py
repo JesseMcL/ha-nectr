@@ -155,6 +155,17 @@ async def test_no_accounts(hass: HomeAssistant, fake_nectr: FakeNectr) -> None:
     assert result["reason"] == "no_accounts"
 
 
+async def test_not_smart_meter(hass: HomeAssistant, fake_nectr: FakeNectr) -> None:
+    """Accounts without a smart meter can't be added."""
+    fake_nectr.account_info["isSmartMeterUser"] = False
+    result = await _start(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_OTP: OTP}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_smart_meter"
+
+
 async def test_already_configured(
     hass: HomeAssistant, fake_nectr: FakeNectr, config_entry: MockConfigEntry
 ) -> None:

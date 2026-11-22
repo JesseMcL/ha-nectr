@@ -48,6 +48,8 @@
       "already_configured": "Account is already configured",
       "reauth_successful": "Re-authentication was successful",
       "no_accounts": "No active Nectr accounts were found for this login.",
+      "not_smart_meter": "This Nectr account does not have a smart meter, so Nectr has no hourly usage to import.",
+      "cannot_connect": "Failed to connect",
       "wrong_account": "This login does not have access to the Nectr account this entry was set up with."
     }
   },

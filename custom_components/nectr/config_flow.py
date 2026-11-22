@@ -197,6 +197,16 @@ class NectrConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self._async_create(self._accounts[0])
         return await self.async_step_account()
 
+    async def _async_check_meter(self, account: Account) -> str | None:
+        """Return an abort reason if the account can't provide interval data."""
+        assert self._client
+        try:
+            info = await self._client.async_get_account_info(account.number)
+        except NectrError:
+            return "cannot_connect"
+        # Hourly data needs a smart (interval) meter.
+        return None if info.is_smart_meter else "not_smart_meter"
+
     async def async_step_account(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -226,6 +236,8 @@ class NectrConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _async_create(self, account: Account) -> ConfigFlowResult:
         await self.async_set_unique_id(account.number)
         self._abort_if_unique_id_configured()
+        if reason := await self._async_check_meter(account):
+            return self.async_abort(reason=reason)
         assert self._client
         return self.async_create_entry(
             title=f"{NAME} {account.address or account.number}",

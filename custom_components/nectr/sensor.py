@@ -41,7 +41,10 @@ SENSORS: tuple[NectrSensorDescription, ...] = (
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
         value=lambda d: d.latest_data,
-        attributes=lambda d: {"backfill_complete": d.backfill_complete},
+        attributes=lambda d: {
+            "backfill_complete": d.backfill_complete,
+            "channels": list(d.channels),
+        },
     ),
     NectrSensorDescription(
         key="billing_period_start",

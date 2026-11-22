@@ -186,6 +186,60 @@ async def test_without_bill_history_and_optional_registers(
     assert await _stats(hass, "controlled_load") == []
 
 
+async def test_channels_discovered_from_data(
+    hass: HomeAssistant, fake_nectr: FakeNectr, config_entry: MockConfigEntry
+) -> None:
+    """Channels appear when Nectr reports them, even without the account flag."""
+    fake_nectr.account_info["isExportRegister"] = False
+    fake_nectr.account_info["isControlledLoad"] = False
+    days = _days(date(2026, 11, 17), date(2026, 11, 20))
+    for day in days:
+        fake_nectr.hourly[day] = full_day()
+
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    assert coordinator.data.channels == ("grid_import",)
+
+    # Solar export starts showing up; it is imported from then on.
+    fake_nectr.hourly[date(2026, 11, 20)] = full_day(export=0.5)
+    await _refresh(hass, config_entry)
+    assert coordinator.data.channels == ("grid_import", "export")
+    export = await _stats(hass, "export")
+    assert len(export) == 4 * 24
+    assert export[-1]["sum"] == pytest.approx(24 * 0.5)
+    assert len(await _stats(hass, "export_credit")) == 4 * 24
+
+    # Once it has statistics it stays, even when the latest days are zero.
+    fake_nectr.hourly[date(2026, 11, 20)] = full_day()
+    await _refresh(hass, config_entry)
+    assert coordinator.data.channels == ("grid_import", "export")
+    latest = hass.states.get("sensor.nectr_1000123_latest_data")
+    assert latest.attributes["channels"] == ["grid_import", "export"]
+
+
+async def test_account_flag_enables_channel_without_data(
+    hass: HomeAssistant, fake_nectr: FakeNectr, config_entry: MockConfigEntry
+) -> None:
+    """A register the account reports is imported even while it reads zero."""
+    fake_nectr.account_info["isExportRegister"] = False
+    for day in _days(date(2026, 11, 17), date(2026, 11, 20)):
+        fake_nectr.hourly[day] = full_day()
+    await _setup(hass, config_entry)
+    assert config_entry.runtime_data.data.channels == ("grid_import", "controlled_load")
+    assert len(await _stats(hass, "controlled_load_cost")) == 4 * 24
+
+
+async def test_basic_meter_imports_nothing(
+    hass: HomeAssistant, fake_nectr: FakeNectr, config_entry: MockConfigEntry
+) -> None:
+    """Accounts without a smart meter load but don't request hourly data."""
+    fake_nectr.account_info["isSmartMeterUser"] = False
+    await _setup(hass, config_entry)
+    assert config_entry.state is ConfigEntryState.LOADED
+    assert fake_nectr.hourly_requests == []
+    assert config_entry.runtime_data.data.channels == ()
+
+
 async def test_refresh_token_rotation_is_saved(
     hass: HomeAssistant, fake_nectr: FakeNectr, config_entry: MockConfigEntry
 ) -> None:

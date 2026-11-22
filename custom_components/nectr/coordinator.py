@@ -65,40 +65,59 @@ type NectrConfigEntry = ConfigEntry[NectrCoordinator]
 
 
 @dataclass(frozen=True, slots=True)
-class Series:
-    """One imported statistic."""
+class Channel:
+    """One metering channel Nectr reports usage and cost for.
+
+    Nectr's hourly usage carries three channels: general (grid) usage,
+    export and controlled load. Which of them a premises has varies, so
+    nothing is assumed: a channel is imported once the account says it has
+    that register, its statistics already exist, or Nectr reports a non-zero
+    value for it.
+    """
 
     key: str
     name: str
-    value: Callable[[HourlyUsage], float]
-    is_energy: bool
-    needs: str | None = None  # AccountInfo flag that must be set
+    energy: Callable[[HourlyUsage], float]
+    cost: Callable[[HourlyUsage], float]
+    cost_name: str
+    account_flag: str | None = None
+
+    @property
+    def energy_key(self) -> str:
+        """Key of the energy statistic."""
+        return self.key
+
+    @property
+    def cost_key(self) -> str:
+        """Key of the cost statistic."""
+        return f"{self.key}_{self.cost_name}"
 
 
-SERIES: tuple[Series, ...] = (
-    Series("grid_import", "grid import", lambda u: u.grid_kwh, True),
-    Series("grid_import_cost", "grid import cost", lambda u: u.grid_cost, False),
-    Series("export", "export", lambda u: u.export_kwh, True, "has_export"),
-    Series(
-        "export_credit", "export credit", lambda u: u.export_credit, False, "has_export"
+CHANNELS: tuple[Channel, ...] = (
+    Channel(
+        "grid_import",
+        "grid import",
+        lambda u: u.grid_kwh,
+        lambda u: u.grid_cost,
+        "cost",
     ),
-    Series(
+    Channel(
+        "export",
+        "export",
+        lambda u: u.export_kwh,
+        lambda u: u.export_credit,
+        "credit",
+        "has_export",
+    ),
+    Channel(
         "controlled_load",
         "controlled load",
         lambda u: u.controlled_load_kwh,
-        True,
-        "has_controlled_load",
-    ),
-    Series(
-        "controlled_load_cost",
-        "controlled load cost",
         lambda u: u.controlled_load_cost,
-        False,
+        "cost",
         "has_controlled_load",
     ),
 )
-# The series used to decide how far the import has got.
-REFERENCE_SERIES = "grid_import"
 
 
 def statistic_id(account: str, key: str) -> str:
@@ -114,6 +133,7 @@ class NectrData:
     account_info: AccountInfo
     latest_data: datetime | None
     backfill_complete: bool
+    channels: tuple[str, ...]
 
 
 class NectrCoordinator(DataUpdateCoordinator[NectrData]):
@@ -150,7 +170,12 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
     async def _async_update_data(self) -> NectrData:
         try:
             info = await self.client.async_get_account_info(self.account)
-            latest, complete = await self._async_import_statistics(info)
+            if info.is_smart_meter:
+                latest, complete, channels = await self._async_import_statistics(info)
+            else:
+                # Without interval data there is nothing to import.
+                _LOGGER.warning("Nectr account %s has no smart meter", self.account)
+                latest, complete, channels = None, True, ()
         except NectrAuthError as err:
             raise ConfigEntryAuthFailed(
                 translation_domain=DOMAIN, translation_key="auth_failed"
@@ -164,24 +189,43 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
 
         self.update_interval = UPDATE_INTERVAL if complete else BACKFILL_UPDATE_INTERVAL
         return NectrData(
-            account_info=info, latest_data=latest, backfill_complete=complete
+            account_info=info,
+            latest_data=latest,
+            backfill_complete=complete,
+            channels=channels,
         )
 
-    def _active_series(self, info: AccountInfo) -> list[Series]:
-        return [s for s in SERIES if s.needs is None or getattr(info, s.needs)]
-
-    def _metadata(self, series: Series) -> StatisticMetaData:
+    def _energy_metadata(self, channel: Channel) -> StatisticMetaData:
         return StatisticMetaData(
             mean_type=StatisticMeanType.NONE,
             has_sum=True,
-            name=f"Nectr {self.account} {series.name}",
+            name=f"Nectr {self.account} {channel.name}",
             source=DOMAIN,
-            statistic_id=statistic_id(self.account, series.key),
-            unit_class=EnergyConverter.UNIT_CLASS if series.is_energy else None,
-            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR
-            if series.is_energy
-            else None,
+            statistic_id=statistic_id(self.account, channel.energy_key),
+            unit_class=EnergyConverter.UNIT_CLASS,
+            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         )
+
+    def _cost_metadata(self, channel: Channel) -> StatisticMetaData:
+        return StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"Nectr {self.account} {channel.name} {channel.cost_name}",
+            source=DOMAIN,
+            statistic_id=statistic_id(self.account, channel.cost_key),
+            unit_class=None,
+            unit_of_measurement=None,
+        )
+
+    def _last_starts(self) -> dict[str, datetime]:
+        """Return the latest statistic start of each channel that has any."""
+        result: dict[str, datetime] = {}
+        for channel in CHANNELS:
+            sid = statistic_id(self.account, channel.energy_key)
+            last = get_last_statistics(self.hass, 1, sid, True, set())
+            if last and last.get(sid):
+                result[channel.key] = dt_util.utc_from_timestamp(last[sid][0]["start"])
+        return result
 
     async def _async_first_day(self) -> date:
         """Return the first day to import when there are no statistics yet."""
@@ -194,22 +238,19 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
 
     async def _async_import_statistics(
         self, info: AccountInfo
-    ) -> tuple[datetime | None, bool]:
+    ) -> tuple[datetime | None, bool, tuple[str, ...]]:
         """Fetch recent days and write statistics.
 
-        Returns the start of the newest hour Nectr has published and whether
-        the import has caught up with today.
+        Returns the start of the newest hour Nectr has published, whether the
+        import has caught up with today, and the channels being imported.
         """
         tz = self.tz
         today = dt_util.now(tz).date()
         recorder = get_instance(self.hass)
-        ref_id = statistic_id(self.account, REFERENCE_SERIES)
 
-        last = await recorder.async_add_executor_job(
-            get_last_statistics, self.hass, 1, ref_id, True, {"sum"}
-        )
-        if last and last.get(ref_id):
-            last_start = dt_util.utc_from_timestamp(last[ref_id][0]["start"])
+        existing = await recorder.async_add_executor_job(self._last_starts)
+        if existing:
+            last_start: datetime | None = max(existing.values())
             start_day = min(
                 last_start.astimezone(tz).date(), today - timedelta(days=LOOKBACK_DAYS)
             )
@@ -228,31 +269,50 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
         _LOGGER.debug("Fetching Nectr usage for %s to %s", start_day, end_day)
         usage = await self._async_fetch_days(days, tz)
 
-        series = self._active_series(info)
+        channels = [
+            c
+            for c in CHANNELS
+            if c.key in existing
+            or (c.account_flag is not None and getattr(info, c.account_flag))
+            or any(c.energy(h) or c.cost(h) for h in usage)
+        ]
         window_start = datetime.combine(start_day, time(), tz).astimezone(UTC)
         sums = await recorder.async_add_executor_job(
             self._sums_before,
             window_start,
-            {statistic_id(self.account, s.key) for s in series},
+            {
+                statistic_id(self.account, key)
+                for c in channels
+                for key in (c.energy_key, c.cost_key)
+            },
         )
 
-        for s in series:
-            sid = statistic_id(self.account, s.key)
-            running = sums.get(sid, 0.0)
-            rows: list[StatisticData] = []
-            for hour in usage:
-                value = s.value(hour)
-                running += value
-                rows.append(StatisticData(start=hour.start, state=value, sum=running))
-            if rows:
-                async_add_external_statistics(self.hass, self._metadata(s), rows)
+        if usage:
+            for channel in channels:
+                for metadata, value in (
+                    (self._energy_metadata(channel), channel.energy),
+                    (self._cost_metadata(channel), channel.cost),
+                ):
+                    running = sums.get(metadata["statistic_id"], 0.0)
+                    rows: list[StatisticData] = []
+                    for hour in usage:
+                        state = value(hour)
+                        running += state
+                        rows.append(
+                            StatisticData(start=hour.start, state=state, sum=running)
+                        )
+                    async_add_external_statistics(self.hass, metadata, rows)
 
         self._resume_day = None if complete else end_day
         latest = usage[-1].start if usage else last_start
         _LOGGER.debug(
-            "Imported %d hours for %s; latest data %s", len(usage), self.account, latest
+            "Imported %d hours of %s for %s; latest data %s",
+            len(usage),
+            [c.key for c in channels],
+            self.account,
+            latest,
         )
-        return latest, complete
+        return latest, complete, tuple(c.key for c in channels)
 
     async def _async_fetch_days(
         self, days: list[date], tz: tzinfo
