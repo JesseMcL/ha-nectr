@@ -1,6 +1,7 @@
 {
   "domain": "nectr",
   "name": "Nectr",
+  "categories": ["energy.meters_monitoring", "energy.energy_prices"],
   "codeowners": ["@JesseMcL"],
   "config_flow": true,
   "dependencies": ["recorder"],
