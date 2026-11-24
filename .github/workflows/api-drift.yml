@@ -3,7 +3,11 @@ name: API drift
 # Nectr's API is undocumented and can change without notice. The unit tests run
 # against a fake built from the schema at the time of writing, so this weekly job
 # validates the queries the integration really sends against the live schema.
-# It needs no login and executes nothing; see scripts/check_api_schema.py.
+# It needs no login, executes nothing and installs nothing: the script only uses
+# the standard library and loads custom_components/nectr/queries.py by path.
+#
+# If Nectr refuses GitHub's network (it has returned a CloudFront 403 here), the
+# job fails with exit code 2 and the issue shows the response headers and body.
 
 on:
   schedule:
@@ -20,14 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - run: pip install -r requirements_test.txt
       - id: check
         run: |
           set +e
-          python scripts/check_api_schema.py | tee report.txt
+          python3 scripts/check_api_schema.py | tee report.txt
           echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
       - name: Open or update an issue
         if: steps.check.outputs.code != '0'

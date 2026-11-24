@@ -1,7 +1,7 @@
 """Async client for the Nectr customer GraphQL API.
 
-This module only depends on aiohttp so it can later be split out into a
-standalone library. The API is the one used by the Nectr "My Account" web app
+This module only depends on aiohttp (and ``queries.py``, which has no
+dependencies) so it can later be split out into a standalone library. The API is the one used by the Nectr "My Account" web app
 (account.nectr.com.au); it is undocumented and may change without notice.
 """
 
@@ -19,10 +19,20 @@ from typing import Any
 
 import aiohttp
 
+from .queries import (
+    ACCOUNT_INFO_QUERY,
+    ACCOUNTS_QUERY,
+    API_URL,
+    APP_VERSION,
+    REQUEST_OTP_MUTATION,
+    RESEND_OTP_MUTATION,
+    USAGE_QUERY,
+    VERIFY_OTP_MUTATION,
+    refresh_mutation,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
-API_URL = "https://mobile.nectr.com.au/graphql"
-APP_VERSION = "2.9.0"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 # Refresh the access token when it has less than this many seconds left.
 TOKEN_REFRESH_MARGIN = 120
@@ -146,69 +156,6 @@ class HourlyUsage:
 
 
 TokenCallback = Callable[[str], Awaitable[None] | None]
-
-
-_ACCOUNTS_QUERY = """
-query getUserBrief {
-  userBrief { accounts { number status address } }
-}"""
-
-_ACCOUNT_INFO_QUERY = """
-query getAccountInfo($accountNumber: String!) {
-  accountInfo(accountNumber: $accountNumber) {
-    isSmartMeterUser
-    isExportRegister
-    isControlledLoad
-    planName
-    currentBillingPeriodStartDate
-    currentBillingPeriodEndDate
-  }
-}"""
-
-_USAGE_QUERY = """
-query getUsageInfo($accountNumber: String!, $isSmartMeterUser: Boolean!,
-    $pageNumber: Int!, $granularity: GRANUALRITY, $fromDate: String!,
-    $toDate: String!) {
-  getUsageInfo(accountNumber: $accountNumber, isSmartMeterUser: $isSmartMeterUser,
-      pageNumber: $pageNumber, granularity: $granularity, fromDate: $fromDate,
-      toDate: $toDate) {
-    message
-    hasNextPage
-    allUsage {
-      period
-      fromDate
-      toDate
-      gridUsage
-      gridCost
-      exportUsage
-      exportCost
-      controlLoadUsage
-      controlLoadCost
-    }
-  }
-}"""
-
-_REQUEST_OTP_MUTATION = """
-mutation requestLoginOtp($email: String!, $password: String!, $deviceId: String!) {
-  requestLoginOtp(email: $email, password: $password, deviceId: $deviceId) {
-    loginSessionId
-  }
-}"""
-
-_VERIFY_OTP_MUTATION = """
-mutation verifyLoginOtp($loginSessionId: String!, $otp: String!, $deviceId: String!) {
-  verifyLoginOtp(loginSessionId: $loginSessionId, otp: $otp, deviceId: $deviceId) {
-    token
-    refreshToken
-  }
-}"""
-
-_RESEND_OTP_MUTATION = """
-mutation resendLoginOtp($loginSessionId: String!, $deviceId: String!) {
-  resendLoginOtp(loginSessionId: $loginSessionId, deviceId: $deviceId) {
-    loginSessionId
-  }
-}"""
 
 
 def _jwt_expiry(token: str) -> float | None:
@@ -382,12 +329,7 @@ class NectrClient:
                 return
             if not self._refresh_token:
                 raise NectrAuthError("No refresh token; log in again")
-            # The web app inlines the refresh token in the query rather than
-            # passing a variable. json.dumps gives a safely quoted literal.
-            query = (
-                "mutation refreshToken { refreshTokens(refreshToken: "
-                f"{json.dumps(self._refresh_token)}) {{ accessToken refreshToken }} }}"
-            )
+            query = refresh_mutation(self._refresh_token)
             try:
                 data = await self._post("refreshToken", query)
             except NectrGraphQLError as err:
@@ -429,7 +371,7 @@ class NectrClient:
         try:
             data = await self._post(
                 "requestLoginOtp",
-                _REQUEST_OTP_MUTATION,
+                REQUEST_OTP_MUTATION,
                 {"email": email, "password": password, "deviceId": self._device_id},
             )
         except NectrGraphQLError as err:
@@ -446,7 +388,7 @@ class NectrClient:
         try:
             data = await self._post(
                 "resendLoginOtp",
-                _RESEND_OTP_MUTATION,
+                RESEND_OTP_MUTATION,
                 {"loginSessionId": login_session_id, "deviceId": self._device_id},
             )
         except NectrGraphQLError as err:
@@ -459,7 +401,7 @@ class NectrClient:
         try:
             data = await self._post(
                 "verifyLoginOtp",
-                _VERIFY_OTP_MUTATION,
+                VERIFY_OTP_MUTATION,
                 {
                     "loginSessionId": login_session_id,
                     "otp": otp.strip(),
@@ -485,7 +427,7 @@ class NectrClient:
 
     async def async_get_accounts(self) -> list[Account]:
         """Return the accounts of the logged in user."""
-        data = await self._authed("getUserBrief", _ACCOUNTS_QUERY)
+        data = await self._authed("getUserBrief", ACCOUNTS_QUERY)
         accounts = ((data.get("userBrief") or {}).get("accounts")) or []
         return [
             Account(
@@ -500,7 +442,7 @@ class NectrClient:
     async def async_get_account_info(self, account_number: str) -> AccountInfo:
         """Return details of one account."""
         data = await self._authed(
-            "getAccountInfo", _ACCOUNT_INFO_QUERY, {"accountNumber": account_number}
+            "getAccountInfo", ACCOUNT_INFO_QUERY, {"accountNumber": account_number}
         )
         info = data.get("accountInfo") or {}
         return AccountInfo(
@@ -522,7 +464,7 @@ class NectrClient:
     ) -> dict[str, Any]:
         data = await self._authed(
             "getUsageInfo",
-            _USAGE_QUERY,
+            USAGE_QUERY,
             {
                 "accountNumber": account_number,
                 "isSmartMeterUser": True,

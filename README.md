@@ -93,3 +93,9 @@ pytest
 ```
 
 Tests run against an in-memory fake of the Nectr API (`tests/conftest.py`). Notes on the API are in the docstrings of `custom_components/nectr/api.py`.
+
+The Nectr API code (`api.py` and `queries.py`) deliberately imports nothing from Home Assistant, so it could move to its own package later.
+
+### Checking for API changes
+
+Nectr's API is undocumented, and the tests use a fake built from its schema at the time of writing. `python scripts/check_api_schema.py` checks the queries the integration sends against Nectr's live schema, without logging in and without executing anything. It needs only Python 3.8 or newer, with nothing installed. A weekly GitHub Actions run does the same, but Nectr may refuse GitHub's network, in which case run it yourself.
