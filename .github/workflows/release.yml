@@ -1,0 +1,38 @@
+name: Release
+
+# Pushing a tag such as v0.2.0 publishes a GitHub release with nectr.zip, which
+# is what HACS installs (hacs.json sets zip_release). The tag must match the
+# version in custom_components/nectr/manifest.json.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag matches the manifest version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('custom_components/nectr/manifest.json'))['version'])")
+          if [ "v$version" != "$TAG" ]; then
+            echo "Tag $TAG does not match manifest version $version" >&2
+            exit 1
+          fi
+      - name: Build nectr.zip
+        run: |
+          cd custom_components/nectr
+          zip -r ../../nectr.zip . -x "__pycache__/*" "*.pyc"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" nectr.zip --verify-tag --generate-notes --title "$TAG"

@@ -99,3 +99,7 @@ The Nectr API code (`api.py` and `queries.py`) deliberately imports nothing from
 ### Checking for API changes
 
 Nectr's API is undocumented, and the tests use a fake built from its schema at the time of writing. `python scripts/check_api_schema.py` checks the queries the integration sends against Nectr's live schema, without logging in and without executing anything. It needs only Python 3.8 or newer, with nothing installed. A weekly GitHub Actions run does the same, but Nectr may refuse GitHub's network, in which case run it yourself.
+
+### Releasing
+
+Set `version` in `custom_components/nectr/manifest.json`, commit, then tag and push `vX.Y.Z` (matching the manifest). The Release workflow publishes a GitHub release with `nectr.zip`, which HACS installs.
