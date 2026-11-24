@@ -2,7 +2,7 @@
 
 Imports the hourly electricity usage and cost that [Nectr](https://nectr.com.au/) bills you for into Home Assistant's long-term statistics, so you can show it in the Energy dashboard next to your own real-time measurements.
 
-This is an unofficial integration. It uses the same API as the Nectr My Account website, which is undocumented and may change.
+This is an unofficial integration, not affiliated with or endorsed by Nectr; the Nectr name and logo belong to their owner and are used here only to identify the service. It uses the same API as the Nectr My Account website, which is undocumented and may change.
 
 ## What you get
 
