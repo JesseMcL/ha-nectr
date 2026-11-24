@@ -335,13 +335,17 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
 
         # Recent days: rewrite the lookback window, or catch up after a gap.
         last_start: datetime | None = None
+        first_chunk = False
         if existing:
             last_start = max(existing.values())
             start_day = min(
                 last_start.astimezone(tz).date(), today - timedelta(days=LOOKBACK_DAYS)
             )
         elif oldest_day is None and not history_done:
-            # Very first update: start the history with the most recent month.
+            # Very first update: start the history with the most recent month,
+            # and leave older months to the following updates so that setup
+            # doesn't wait on them.
+            first_chunk = True
             first_day = await self._async_first_day(today)
             start_day = max(first_day, today - timedelta(days=MAX_DAYS_PER_UPDATE - 1))
             oldest_day = start_day
@@ -361,7 +365,12 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
         # the recent days are up to date.
         history: list[HourlyUsage] = []
         history_end = oldest_day
-        if caught_up and not history_done and history_end is not None:
+        if (
+            caught_up
+            and not first_chunk
+            and not history_done
+            and history_end is not None
+        ):
             first_day = await self._async_first_day(today)
             history_start = max(
                 first_day, history_end - timedelta(days=MAX_DAYS_PER_UPDATE)
