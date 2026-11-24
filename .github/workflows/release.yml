@@ -2,7 +2,9 @@ name: Release
 
 # Pushing a tag such as v0.2.0 publishes a GitHub release with nectr.zip, which
 # is what HACS installs (hacs.json sets zip_release). The tag must match the
-# version in custom_components/nectr/manifest.json.
+# version in custom_components/nectr/manifest.json, and the full Validate
+# workflow (hassfest, HACS, lint and tests) must pass on the tagged commit
+# before anything is built or published.
 
 on:
   push:
@@ -13,8 +15,13 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate.yml
+
   release:
     name: Build and publish
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

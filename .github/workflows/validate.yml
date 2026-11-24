@@ -2,10 +2,13 @@ name: Validate
 
 on:
   push:
+    # Tags are validated by the Release workflow, which calls this workflow.
+    branches: ["**"]
   pull_request:
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   hassfest:
