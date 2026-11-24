@@ -16,7 +16,9 @@ Nectr publishes smart meter data a day or more after the fact, and often fills a
 
 Channels are discovered per premises: one is imported when Nectr says your account has that register, or when your data contains it (for example, export appears once solar is installed). Costs are the amounts Nectr calculated for each hour on your plan.
 
-On first setup the integration backfills as much history as Nectr has (up to three years), a month at a time every few minutes. After that it checks every three hours and rewrites the last four days, so partly published days and corrections are picked up.
+On first setup the integration backfills as much history as Nectr has (up to three years), a month at a time, starting with the most recent month and working back, so recent usage shows up straight away. It fetches the next month every few minutes (the **History poll interval** option, default 5 minutes) and remembers its progress across restarts. After that it checks every three hours and rewrites the last four days, so partly published days and corrections are picked up. Older days are not checked again automatically; use the [re-import action](#re-importing-older-days) for those.
+
+Because older months are added before the existing statistics, the running total (`sum`) of the earliest hours can be negative. The Energy dashboard and statistics cards only use differences, so this doesn't affect what they show.
 
 It also adds diagnostic sensors for the newest hour Nectr has published (with the discovered channels as an attribute) and the current billing period.
 
@@ -45,6 +47,8 @@ Copy `custom_components/nectr` into your Home Assistant `custom_components` fold
 
 Your password is not stored. The integration keeps itself signed in with the token Nectr issues, which Nectr renews each time it is used. If Nectr ever rejects it, Home Assistant asks you to sign in again with your password and a new code.
 
+To change the history poll interval, open the Nectr integration and choose **Configure**.
+
 ## Energy dashboard
 
 In **Settings → Dashboards → Energy**:
@@ -54,6 +58,24 @@ In **Settings → Dashboards → Energy**:
 - **Return to grid**: add *Nectr … export* with *Nectr … export credit* as the compensation.
 
 To compare with your own real-time meter or CT clamp, keep those on the dashboard as well, or use a statistics graph card with both.
+
+## Re-importing older days
+
+Only the last four days are refreshed automatically. If Nectr corrects older data, or a day was missing when it was first imported, run the **Nectr: Re-import usage** action (`nectr.reimport`) from **Developer tools → Actions**:
+
+```yaml
+action: nectr.reimport
+data:
+  config_entry_id: <your Nectr entry>  # pick it from the list in the UI
+  start_date: "2026-10-01"
+  end_date: "2026-10-31"  # optional, defaults to today
+```
+
+The action fetches every day in the range again and rewrites its hourly statistics. The running totals of all later hours are then shifted by however much the range changed, so the Energy dashboard doesn't show a jump at the end of the range.
+
+- Days Nectr returns no data for are left as they were. The action's response lists them under `days_without_data`, along with the number of `hours` imported.
+- Each day is a separate request to Nectr (four at a time), so a long range can take a while. The action returns once the statistics have been written.
+- The regular update waits while a re-import runs, and the other way round.
 
 ## Limitations
 

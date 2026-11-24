@@ -1,0 +1,7 @@
+{
+  "services": {
+    "reimport": {
+      "service": "mdi:database-refresh"
+    }
+  }
+}

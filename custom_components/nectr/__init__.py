@@ -8,13 +8,24 @@ from __future__ import annotations
 
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
 from .api import NectrClient
-from .const import CONF_DEVICE_ID, CONF_REFRESH_TOKEN
-from .coordinator import NectrConfigEntry, NectrCoordinator
+from .const import CONF_DEVICE_ID, CONF_REFRESH_TOKEN, DOMAIN
+from .coordinator import NectrConfigEntry, NectrCoordinator, history_store
+from .services import async_setup_services
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the Nectr actions."""
+    async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: NectrConfigEntry) -> bool:
@@ -44,3 +55,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: NectrConfigEntry) -> boo
 async def async_unload_entry(hass: HomeAssistant, entry: NectrConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: NectrConfigEntry) -> None:
+    """Forget the backfill progress when the entry is deleted."""
+    await history_store(hass, entry.entry_id).async_remove()

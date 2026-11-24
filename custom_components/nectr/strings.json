@@ -53,6 +53,19 @@
       "wrong_account": "This login does not have access to the Nectr account this entry was set up with."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nectr options",
+        "data": {
+          "history_poll_interval": "History poll interval"
+        },
+        "data_description": {
+          "history_poll_interval": "Minutes between updates while past usage is still being imported, a month at a time from the newest back. Once the history is complete, Nectr is checked every three hours."
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "latest_data": {
@@ -72,6 +85,35 @@
     },
     "update_failed": {
       "message": "Could not get data from Nectr: {error}"
+    },
+    "entry_not_found": {
+      "message": "No Nectr account with config entry ID {entry_id}."
+    },
+    "entry_not_loaded": {
+      "message": "{title} is not loaded."
+    },
+    "invalid_date_range": {
+      "message": "The start date must not be after the end date."
+    }
+  },
+  "services": {
+    "reimport": {
+      "name": "Re-import usage",
+      "description": "Fetches a range of days from Nectr again and rewrites their statistics, picking up corrections and filling gaps. Later statistics are shifted so the running totals stay continuous.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Nectr account",
+          "description": "The Nectr account to re-import."
+        },
+        "start_date": {
+          "name": "Start date",
+          "description": "First day to re-import."
+        },
+        "end_date": {
+          "name": "End date",
+          "description": "Last day to re-import. Defaults to today."
+        }
+      }
     }
   }
 }

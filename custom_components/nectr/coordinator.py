@@ -9,6 +9,17 @@ Every update re-fetches the last few days and rewrites their statistics,
 continuing the running sums from the last statistic before that window. Rows
 with the same start time are replaced, so partly published days and later
 corrections are filled in automatically.
+
+History is backfilled newest first: the first update imports the most recent
+month, and each later update imports the month before the oldest day imported
+so far, until Nectr has nothing older. An older chunk is written so that its
+running sum ends exactly where the newer statistics begin, which leaves the
+newer rows untouched. The oldest sums are therefore negative; that is harmless,
+because the Energy dashboard only uses differences between sums.
+
+The ``nectr.reimport`` action rewrites any range of days on request. The sums
+of all later statistics are then shifted by however much the range's total
+changed, so the running sums stay continuous.
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
@@ -49,8 +61,9 @@ from .api import (
     NectrError,
 )
 from .const import (
-    BACKFILL_UPDATE_INTERVAL,
     CONF_ACCOUNT_NUMBER,
+    CONF_HISTORY_POLL_INTERVAL,
+    DEFAULT_HISTORY_POLL_INTERVAL,
     DOMAIN,
     FETCH_CONCURRENCY,
     LOOKBACK_DAYS,
@@ -126,6 +139,22 @@ def statistic_id(account: str, key: str) -> str:
     return f"{DOMAIN}:{slug}_{key}"
 
 
+STORAGE_VERSION = 1
+
+
+def history_store(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
+    """Return the store that records how far the history backfill has got."""
+    return Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.history")
+
+
+@dataclass(frozen=True, slots=True)
+class ReimportResult:
+    """What a re-import did."""
+
+    hours: int
+    days_without_data: list[date]
+
+
 @dataclass(frozen=True, slots=True)
 class NectrData:
     """Data exposed to entities."""
@@ -154,9 +183,24 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
         )
         self.client = client
         self.account: str = entry.data[CONF_ACCOUNT_NUMBER]
-        # Where the next backfill chunk starts. Needed so a stretch of days
-        # with no data at all can't stall the backfill.
+        self.history_poll_interval = timedelta(
+            minutes=entry.options.get(
+                CONF_HISTORY_POLL_INTERVAL, DEFAULT_HISTORY_POLL_INTERVAL
+            )
+        )
+        # Where the next catch-up chunk starts after a gap (for example Home
+        # Assistant being off for weeks). Needed so a stretch of days with no
+        # data at all can't stall the catch-up.
         self._resume_day: date | None = None
+        # History backfill progress, kept across restarts: the oldest day
+        # imported so far, and whether there is nothing older to import.
+        self._store = history_store(hass, entry.entry_id)
+        self._history_loaded = False
+        self._oldest_day: date | None = None
+        self._history_done = False
+        self._first_day: date | None = None
+        # Serialises updates and re-imports, which both read and write sums.
+        self._lock = asyncio.Lock()
 
     @property
     def tz(self) -> tzinfo:
@@ -168,6 +212,10 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
         return dt_util.get_default_time_zone()
 
     async def _async_update_data(self) -> NectrData:
+        async with self._lock:
+            return await self._async_update()
+
+    async def _async_update(self) -> NectrData:
         try:
             info = await self.client.async_get_account_info(self.account)
             if info.is_smart_meter:
@@ -187,7 +235,9 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
                 translation_placeholders={"error": str(err)},
             ) from err
 
-        self.update_interval = UPDATE_INTERVAL if complete else BACKFILL_UPDATE_INTERVAL
+        self.update_interval = (
+            UPDATE_INTERVAL if complete else self.history_poll_interval
+        )
         return NectrData(
             account_info=info,
             latest_data=latest,
@@ -227,92 +277,239 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
                 result[channel.key] = dt_util.utc_from_timestamp(last[sid][0]["start"])
         return result
 
-    async def _async_first_day(self) -> date:
-        """Return the first day to import when there are no statistics yet."""
-        today = dt_util.now(self.tz).date()
-        floor = today - timedelta(days=MAX_BACKFILL_DAYS)
-        periods = await self.client.async_get_bill_periods(self.account)
-        if not periods:
-            return today - timedelta(days=LOOKBACK_DAYS)
-        return max(floor, min(p.start for p in periods))
+    async def _async_first_day(self, today: date) -> date:
+        """Return the oldest day the history backfill goes back to."""
+        if self._first_day is None:
+            floor = today - timedelta(days=MAX_BACKFILL_DAYS)
+            periods = await self.client.async_get_bill_periods(self.account)
+            if periods:
+                self._first_day = max(floor, min(p.start for p in periods))
+            else:
+                self._first_day = today - timedelta(days=LOOKBACK_DAYS)
+        return self._first_day
+
+    async def _async_load_history(self, has_statistics: bool) -> None:
+        """Load the backfill progress saved by an earlier run."""
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        stored = await self._store.async_load()
+        if stored is None:
+            # Statistics without saved progress were imported by a version that
+            # backfilled oldest first, so the history is already there.
+            self._history_done = has_statistics
+            if has_statistics:
+                await self._async_save_history()
+            return
+        oldest = stored.get("oldest_day")
+        self._oldest_day = date.fromisoformat(oldest) if oldest else None
+        self._history_done = bool(stored.get("done"))
+
+    async def _async_save_history(self) -> None:
+        oldest = self._oldest_day
+        await self._store.async_save(
+            {
+                "oldest_day": oldest.isoformat() if oldest else None,
+                "done": self._history_done,
+            }
+        )
 
     async def _async_import_statistics(
         self, info: AccountInfo
     ) -> tuple[datetime | None, bool, tuple[str, ...]]:
-        """Fetch recent days and write statistics.
+        """Fetch recent days and a chunk of history, and write statistics.
 
         Returns the start of the newest hour Nectr has published, whether the
-        import has caught up with today, and the channels being imported.
+        import has caught up with today and finished the history, and the
+        channels being imported.
         """
         tz = self.tz
         today = dt_util.now(tz).date()
         recorder = get_instance(self.hass)
 
         existing = await recorder.async_add_executor_job(self._last_starts)
+        await self._async_load_history(bool(existing))
+        # Progress is only committed once everything has been fetched, so a
+        # failed update is simply repeated.
+        oldest_day, history_done = self._oldest_day, self._history_done
+
+        # Recent days: rewrite the lookback window, or catch up after a gap.
+        last_start: datetime | None = None
         if existing:
-            last_start: datetime | None = max(existing.values())
+            last_start = max(existing.values())
             start_day = min(
                 last_start.astimezone(tz).date(), today - timedelta(days=LOOKBACK_DAYS)
             )
+        elif oldest_day is None and not history_done:
+            # Very first update: start the history with the most recent month.
+            first_day = await self._async_first_day(today)
+            start_day = max(first_day, today - timedelta(days=MAX_DAYS_PER_UPDATE - 1))
+            oldest_day = start_day
+            history_done = start_day <= first_day
         else:
-            last_start = None
-            start_day = await self._async_first_day()
+            start_day = today - timedelta(days=LOOKBACK_DAYS)
         if self._resume_day and self._resume_day > start_day:
             start_day = self._resume_day
-
         end_day = min(today, start_day + timedelta(days=MAX_DAYS_PER_UPDATE - 1))
-        complete = end_day >= today
+        caught_up = end_day >= today
+        self._resume_day = None if caught_up else end_day
 
-        days = [
-            start_day + timedelta(days=n) for n in range((end_day - start_day).days + 1)
-        ]
         _LOGGER.debug("Fetching Nectr usage for %s to %s", start_day, end_day)
-        usage = await self._async_fetch_days(days, tz)
+        usage = await self._async_fetch_days(_day_range(start_day, end_day), tz)
 
-        channels = [
-            c
-            for c in CHANNELS
-            if c.key in existing
-            or (c.account_flag is not None and getattr(info, c.account_flag))
-            or any(c.energy(h) or c.cost(h) for h in usage)
-        ]
-        window_start = datetime.combine(start_day, time(), tz).astimezone(UTC)
-        sums = await recorder.async_add_executor_job(
-            self._sums_before,
-            window_start,
-            {
-                statistic_id(self.account, key)
-                for c in channels
-                for key in (c.energy_key, c.cost_key)
-            },
-        )
+        # Older history: one chunk before the oldest day imported so far, once
+        # the recent days are up to date.
+        history: list[HourlyUsage] = []
+        history_end = oldest_day
+        if caught_up and not history_done and history_end is not None:
+            first_day = await self._async_first_day(today)
+            history_start = max(
+                first_day, history_end - timedelta(days=MAX_DAYS_PER_UPDATE)
+            )
+            if history_start < history_end:
+                _LOGGER.debug(
+                    "Fetching Nectr history for %s to %s",
+                    history_start,
+                    history_end - timedelta(days=1),
+                )
+                history = await self._async_fetch_days(
+                    _day_range(history_start, history_end - timedelta(days=1)), tz
+                )
+            # Nectr has nothing older once a whole chunk comes back empty
+            # (for example before the smart meter was installed).
+            history_done = history_start <= first_day or not history
+            if history:
+                oldest_day = history_start
+
+        channels = _select_channels(info, existing, [*usage, *history])
+        ids = self._statistic_ids(channels)
 
         if usage:
-            for channel in channels:
-                for metadata, value in (
-                    (self._energy_metadata(channel), channel.energy),
-                    (self._cost_metadata(channel), channel.cost),
-                ):
-                    running = sums.get(metadata["statistic_id"], 0.0)
-                    rows: list[StatisticData] = []
-                    for hour in usage:
-                        state = value(hour)
-                        running += state
-                        rows.append(
-                            StatisticData(start=hour.start, state=state, sum=running)
-                        )
-                    async_add_external_statistics(self.hass, metadata, rows)
+            window_start = datetime.combine(start_day, time(), tz).astimezone(UTC)
+            sums = await recorder.async_add_executor_job(
+                self._sums_before, window_start, ids
+            )
+            self._write_statistics(channels, usage, sums, ends_at=False)
+        if history:
+            assert history_end is not None
+            window_end = datetime.combine(history_end, time(), tz).astimezone(UTC)
+            sums = await recorder.async_add_executor_job(
+                self._sums_from, window_end, ids
+            )
+            self._write_statistics(channels, history, sums, ends_at=True)
+        if (oldest_day, history_done) != (self._oldest_day, self._history_done):
+            self._oldest_day, self._history_done = oldest_day, history_done
+            await self._async_save_history()
 
-        self._resume_day = None if complete else end_day
+        complete = caught_up and self._history_done
         latest = usage[-1].start if usage else last_start
         _LOGGER.debug(
-            "Imported %d hours of %s for %s; latest data %s",
+            "Imported %d recent and %d older hours of %s for %s; latest data %s, "
+            "history back to %s%s",
             len(usage),
+            len(history),
             [c.key for c in channels],
             self.account,
             latest,
+            self._oldest_day,
+            " (complete)" if self._history_done else "",
         )
         return latest, complete, tuple(c.key for c in channels)
+
+    def _statistic_ids(self, channels: list[Channel]) -> set[str]:
+        return {
+            statistic_id(self.account, key)
+            for c in channels
+            for key in (c.energy_key, c.cost_key)
+        }
+
+    def _write_statistics(
+        self,
+        channels: list[Channel],
+        usage: list[HourlyUsage],
+        sums: dict[str, float],
+        *,
+        ends_at: bool,
+    ) -> dict[str, float]:
+        """Queue statistics for consecutive hours.
+
+        ``sums`` holds each statistic's running sum just before the first hour
+        or, with ``ends_at``, just after the last hour. Returns each
+        statistic's sum after the last hour.
+        """
+        end_sums: dict[str, float] = {}
+        for channel in channels:
+            for metadata, value in (
+                (self._energy_metadata(channel), channel.energy),
+                (self._cost_metadata(channel), channel.cost),
+            ):
+                states = [value(hour) for hour in usage]
+                running = sums.get(metadata["statistic_id"], 0.0)
+                if ends_at:
+                    running -= sum(states)
+                rows: list[StatisticData] = []
+                for hour, state in zip(usage, states, strict=True):
+                    running += state
+                    rows.append(
+                        StatisticData(start=hour.start, state=state, sum=running)
+                    )
+                async_add_external_statistics(self.hass, metadata, rows)
+                end_sums[metadata["statistic_id"]] = running
+        return end_sums
+
+    async def async_reimport(self, start: date, end: date) -> ReimportResult:
+        """Fetch the days from start to end again and rewrite their statistics.
+
+        Days Nectr returns nothing for are left as they are. After each run of
+        days that was rewritten, the sums of all later statistics are shifted
+        so they carry on from the new values.
+        """
+        async with self._lock:
+            tz = self.tz
+            recorder = get_instance(self.hass)
+            info = await self.client.async_get_account_info(self.account)
+            days = _day_range(start, end)
+            _LOGGER.debug("Re-importing Nectr usage for %s to %s", start, end)
+            usage = await self._async_fetch_days(days, tz)
+
+            existing = await recorder.async_add_executor_job(self._last_starts)
+            channels = _select_channels(info, existing, usage)
+            ids = self._statistic_ids(channels)
+            units = {
+                metadata["statistic_id"]: metadata["unit_of_measurement"]
+                for c in channels
+                for metadata in (self._energy_metadata(c), self._cost_metadata(c))
+            }
+
+            by_day: dict[date, list[HourlyUsage]] = {}
+            for hour in usage:
+                by_day.setdefault(hour.start.astimezone(tz).date(), []).append(hour)
+
+            for run in _consecutive_runs(sorted(by_day)):
+                hours = [h for day in run for h in by_day[day]]
+                run_start = datetime.combine(run[0], time(), tz).astimezone(UTC)
+                after = hours[-1].start + timedelta(hours=1)
+                sums = await recorder.async_add_executor_job(
+                    self._sums_before, run_start, ids
+                )
+                # Read before writing: what the statistics after this run
+                # currently carry on from.
+                following = await recorder.async_add_executor_job(
+                    self._sums_from, after, ids
+                )
+                end_sums = self._write_statistics(channels, hours, sums, ends_at=False)
+                for sid, previous in following.items():
+                    if (adjustment := end_sums.get(sid, previous) - previous) != 0:
+                        recorder.async_adjust_statistics(
+                            sid, after, adjustment, units[sid]
+                        )
+                # The next run reads sums this one wrote.
+                await recorder.async_block_till_done()
+
+        return ReimportResult(
+            hours=len(usage),
+            days_without_data=[d for d in days if d not in by_day],
+        )
 
     async def _async_fetch_days(
         self, days: list[date], tz: tzinfo
@@ -365,3 +562,63 @@ class NectrCoordinator(DataUpdateCoordinator[NectrData]):
                     result[sid] = float(rows[-1]["sum"])
                     remaining.discard(sid)
         return result
+
+    def _sums_from(self, window_end: datetime, ids: set[str]) -> dict[str, float]:
+        """Return each statistic's sum before its first hour from window_end on.
+
+        This is where an older chunk written before window_end must end. Looks
+        progressively further ahead, since a statistic may start later.
+        """
+        result: dict[str, float] = {}
+        remaining = set(ids)
+        for lookahead in (
+            timedelta(days=1),
+            timedelta(days=7),
+            timedelta(days=60),
+            None,
+        ):
+            if not remaining:
+                break
+            stats: dict[str, list[Any]] = statistics_during_period(
+                self.hass,
+                window_end,
+                window_end + lookahead if lookahead else None,
+                remaining,
+                "hour",
+                None,
+                {"state", "sum"},
+            )
+            for sid, rows in stats.items():
+                if rows and rows[0].get("sum") is not None:
+                    result[sid] = float(rows[0]["sum"]) - float(rows[0]["state"] or 0)
+                    remaining.discard(sid)
+        return result
+
+
+def _select_channels(
+    info: AccountInfo, existing: dict[str, datetime], usage: list[HourlyUsage]
+) -> list[Channel]:
+    """Return the channels to import (see Channel)."""
+    return [
+        c
+        for c in CHANNELS
+        if c.key in existing
+        or (c.account_flag is not None and getattr(info, c.account_flag))
+        or any(c.energy(h) or c.cost(h) for h in usage)
+    ]
+
+
+def _consecutive_runs(days: list[date]) -> list[list[date]]:
+    """Split sorted days into runs of consecutive days."""
+    runs: list[list[date]] = []
+    for day in days:
+        if runs and day - runs[-1][-1] == timedelta(days=1):
+            runs[-1].append(day)
+        else:
+            runs.append([day])
+    return runs
+
+
+def _day_range(first: date, last: date) -> list[date]:
+    """Return the days from first to last inclusive."""
+    return [first + timedelta(days=n) for n in range((last - first).days + 1)]

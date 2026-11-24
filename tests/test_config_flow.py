@@ -12,6 +12,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.nectr.const import (
     CONF_ACCOUNT_NUMBER,
     CONF_DEVICE_ID,
+    CONF_HISTORY_POLL_INTERVAL,
     CONF_OTP,
     CONF_REFRESH_TOKEN,
     CONF_RESEND,
@@ -222,3 +223,20 @@ async def test_reauth_wrong_account(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "wrong_account"
     assert config_entry.data[CONF_REFRESH_TOKEN] == "rt-initial"
+
+
+async def test_options_flow(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
+    """The history poll interval defaults to 5 minutes and can be changed."""
+    config_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "init"
+    schema = result["data_schema"].schema
+    default = next(k for k in schema if k == CONF_HISTORY_POLL_INTERVAL).default()
+    assert default == 5
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_HISTORY_POLL_INTERVAL: 15.0}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert config_entry.options == {CONF_HISTORY_POLL_INTERVAL: 15}

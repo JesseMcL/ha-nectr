@@ -13,10 +13,20 @@ import logging
 from typing import Any
 import uuid
 
-from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.config_entries import (
+    SOURCE_REAUTH,
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlowWithReload,
+)
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, UnitOfTime
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -40,9 +50,11 @@ from .api import (
 from .const import (
     CONF_ACCOUNT_NUMBER,
     CONF_DEVICE_ID,
+    CONF_HISTORY_POLL_INTERVAL,
     CONF_OTP,
     CONF_REFRESH_TOKEN,
     CONF_RESEND,
+    DEFAULT_HISTORY_POLL_INTERVAL,
     DOMAIN,
     NAME,
 )
@@ -56,6 +68,12 @@ class NectrConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Nectr."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> NectrOptionsFlow:
+        """Return the options flow."""
+        return NectrOptionsFlow()
 
     def __init__(self) -> None:
         """Initialise the flow."""
@@ -273,3 +291,40 @@ class NectrConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"email": self._email or ""},
         )
+
+
+class NectrOptionsFlow(OptionsFlowWithReload):
+    """Handle Nectr options."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Set how often history is fetched while backfilling."""
+        if user_input is not None:
+            return self.async_create_entry(
+                data={
+                    CONF_HISTORY_POLL_INTERVAL: int(
+                        user_input[CONF_HISTORY_POLL_INTERVAL]
+                    )
+                }
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_HISTORY_POLL_INTERVAL,
+                    default=self.config_entry.options.get(
+                        CONF_HISTORY_POLL_INTERVAL, DEFAULT_HISTORY_POLL_INTERVAL
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1,
+                        max=1440,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement=UnitOfTime.MINUTES,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
