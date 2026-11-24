@@ -67,15 +67,20 @@ def validate(document: str) -> list[str]:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read()
+            status, body = response.status, response.read()
     except urllib.error.HTTPError as err:
-        body = err.read()
-    errors = json.loads(body).get("errors") or []
+        status, body = err.code, err.read()
+    try:
+        errors = json.loads(body).get("errors") or []
+    except ValueError:
+        errors = []
     if not errors or not all(
         e.get("extensions", {}).get("code") == "GRAPHQL_VALIDATION_FAILED"
         for e in errors
     ):
-        raise RuntimeError(f"Unexpected response: {body[:300]!r}")
+        # Not a GraphQL validation answer (for example a block page from a
+        # firewall that doesn't like this network): show what came back.
+        raise RuntimeError(f"HTTP {status}, unexpected response: {body[:300]!r}")
     return [e["message"] for e in errors if PROBE not in e["message"]]
 
 
