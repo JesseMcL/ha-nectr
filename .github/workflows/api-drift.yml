@@ -1,0 +1,50 @@
+name: API drift
+
+# Nectr's API is undocumented and can change without notice. The unit tests run
+# against a fake built from the schema at the time of writing, so this weekly job
+# validates the queries the integration really sends against the live schema.
+# It needs no login and executes nothing; see scripts/check_api_schema.py.
+
+on:
+  schedule:
+    - cron: "17 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Check Nectr schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements_test.txt
+      - id: check
+        run: |
+          set +e
+          python scripts/check_api_schema.py | tee report.txt
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Open or update an issue
+        if: steps.check.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODE: ${{ steps.check.outputs.code }}
+        run: |
+          title="Nectr API check failed"
+          [ "$CODE" = "1" ] && title="Nectr API has changed"
+          body="Weekly check, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"$'\n\n```\n'"$(cat report.txt)"$'\n```'
+          existing=$(gh issue list --label api-drift --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh label create api-drift --color D93F0B --description "Nectr API drift" 2>/dev/null || true
+            gh issue create --title "$title" --label api-drift --body "$body"
+          fi
+      - name: Fail the job
+        if: steps.check.outputs.code != '0'
+        run: exit 1
